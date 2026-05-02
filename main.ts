@@ -33,6 +33,8 @@ const VIEW_TYPE_RECENT_EDITS = "recent-edits-view";
 const SUPPORTED_EXTENSIONS = new Set(["md", "canvas", "base"]);
 const HOVER_SOURCE = "recent-edits";
 const EDITOR_CHANGE_WINDOW_MS = 5000;
+const FILE_OPEN_WINDOW_MS = 2000;
+const CREATE_CLASSIFY_DELAY_MS = 800;
 
 type EditSource = "obsidian" | "external";
 
@@ -40,6 +42,7 @@ export default class RecentEditsPlugin extends Plugin {
   settings: RecentEditsSettings = DEFAULT_SETTINGS;
   editSources: Record<string, EditSource> = {};
   private editorChangeTimes = new Map<string, number>();
+  private recentFileOpens = new Map<string, number>();
   private saveDataTimer: number | null = null;
 
   async onload() {
@@ -70,9 +73,26 @@ export default class RecentEditsPlugin extends Plugin {
     );
 
     this.registerEvent(
+      this.app.workspace.on("file-open", (file) => {
+        if (file && file.path) {
+          this.recentFileOpens.set(file.path, Date.now());
+        }
+      })
+    );
+
+    this.registerEvent(
       this.app.vault.on("create", (file) => {
         if (file instanceof TFile) {
-          this.classifyEdit(file, true);
+          // Defer classification so workspace `file-open` has time to fire.
+          // Core-plugin flows (Daily Notes, Templater, "New note from
+          // template") create the file then open it; the file-open is
+          // our signal that this was an Obsidian-internal create.
+          window.setTimeout(() => {
+            if (this.app.vault.getAbstractFileByPath(file.path) === file) {
+              this.classifyEdit(file, true);
+              this.refreshViews();
+            }
+          }, CREATE_CLASSIFY_DELAY_MS);
         }
         this.refreshViews();
       })
@@ -118,7 +138,11 @@ export default class RecentEditsPlugin extends Plugin {
     // Empty files at create time are Obsidian-internal (unresolved wikilink
     // click, "New note" command). External writes always carry content.
     const isEmptyCreate = isCreate && file.stat.size === 0;
-    const isObsidian = recentEditorChange || isEmptyCreate;
+    // Recent file-open signals a workspace-driven edit (core plugins like
+    // Daily Notes, Templater, command-palette actions that open the file).
+    const lastOpen = this.recentFileOpens.get(file.path) ?? 0;
+    const recentFileOpen = Date.now() - lastOpen < FILE_OPEN_WINDOW_MS;
+    const isObsidian = recentEditorChange || isEmptyCreate || recentFileOpen;
     this.editSources[file.path] = isObsidian ? "obsidian" : "external";
     this.scheduleSaveData();
   }
