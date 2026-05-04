@@ -20,6 +20,8 @@ Recent Edits closes that gap. It shows what changed, when it changed, and visual
 - Configurable indicator dot for edits that came from outside Obsidian's editor
 - "Background folders" toggle: hide noisy folders by default, reveal inline via toggle
 - "Excluded folders" to permanently hide certain edits
+- Click the folder path on a row to copy the file's absolute filesystem path (useful for handing off to AI tools or CLI)
+- Right-click → **Clear from list** to dismiss a file from the panel until its next edit
 - Optional hover preview (uses the Page Preview core plugin)
 - Includes `.md`, `.canvas`, and `.base` files
 
@@ -41,16 +43,34 @@ Recent Edits closes that gap. It shows what changed, when it changed, and visual
 | Background folders | folder list | `[]` | Hidden by default; revealed by the per-day-header toggle. Useful for files that update often but you only check occasionally. |
 | Excluded folders | folder list | `[]` | Hidden completely. Dot-prefixed folders (`.obsidian`, `.trash`) are always excluded regardless. |
 
+## Row interactions
+
+| Click target | Action |
+|---|---|
+| Filename | Open the file. Activates an existing tab if open; otherwise opens a new one. |
+| Cmd/Ctrl-click filename | Always open in a new tab. |
+| Folder path | Copy the file's absolute filesystem path to the clipboard. |
+| Right-click anywhere on the row | Open in new tab / split / window, Copy path (vault-relative), Reveal in Finder, Rename, Delete, Clear from list. |
+| Day header | Collapse or expand the day's group. |
+| **More** / **Less** pill on a day header | Toggle whether files in your background folders are shown. Only appears if you've configured background folders. |
+
 ## How the external-edit indicator works
 
-The plugin listens for Obsidian's `editor-change` event (fires when a file is edited inside Obsidian) and the vault's `create`/`modify` events (fire for any change, including writes from outside Obsidian). When a file is created or modified without a recent matching `editor-change`, it's classified as an external edit.
+The classifier combines a few signals:
 
-### Potential Limitations
+- `editor-change` events (fires when a file is being edited inside Obsidian's editor).
+- `vault.create` / `vault.modify` events (fire for any change, including writes from outside Obsidian).
+- `workspace.file-open` events (used to recognize core-plugin flows that create-and-open a file, like Daily Notes from the command palette).
+- File size at create time (a brand-new empty file is treated as Obsidian-internal — wikilink click, "New note" command, etc.).
 
-The external-edit status is meant to be an indication. I've tried to make it accurate for my setup, but variations in setup or changes in the future mean you should treat it as an indicator rather than a perfect signal. It could mistake:
+A file is classified as an external edit only when none of those internal signals fire near the create or modify event.
+
+### Potential limitations
+
+The external-edit status is meant to be an indicator, not a perfect signal. It could mistake:
 
 - Edits arriving via Obsidian Sync from another device.
-- Writes from other plugins (Templater, Daily Notes, etc.).
+- Plugin background writes that never open the file in a workspace leaf (rare in practice).
 - Files modified before the plugin was installed (these stay unclassified until the next time they're touched).
 
 ## Support
