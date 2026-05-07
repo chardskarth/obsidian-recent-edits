@@ -40,6 +40,14 @@ const VIEW_TYPE_RECENT_EDITS = "recent-edits-view";
 const SUPPORTED_EXTENSIONS = new Set(["md", "canvas", "base"]);
 const HOVER_SOURCE = "recent-edits";
 const EDITOR_CHANGE_WINDOW_MS = 5000;
+// Longer window used to decide whether an external edit is a local Claude
+// follow-up to recent Obsidian editing on this file (vs. a sync delivery).
+const ACTIVE_LOCAL_FILE_WINDOW_MS = 5 * 60 * 1000;
+// Threshold for "the canonical mtime is far enough behind stat.mtime that
+// this is clearly a new edit, not a sync follow-up." Keeps us from
+// overwriting Mac's canonical with a sync-receipt time when sync delivers
+// a file from mobile shortly after mobile edited it.
+const EXTERNAL_SYNC_GUARD_MS = 60_000;
 const FILE_OPEN_WINDOW_MS = 2000;
 const CREATE_CLASSIFY_DELAY_MS = 800;
 
@@ -214,10 +222,28 @@ export default class RecentEditsPlugin extends Plugin {
       this.editTimes[file.path] = file.stat.mtime;
     } else if (Platform.isDesktop) {
       const persisted = this.editTimes[file.path];
-      const looksLikeSyncDelivery =
-        persisted !== undefined && file.stat.mtime - persisted < 60_000;
-      if (!looksLikeSyncDelivery) {
+      if (persisted === undefined) {
+        // No canonical yet — safe to record.
         this.editTimes[file.path] = file.stat.mtime;
+      } else {
+        const mtimeAdvance = file.stat.mtime - persisted;
+        const recentLocalEditorChange =
+          Date.now() - lastChange < ACTIVE_LOCAL_FILE_WINDOW_MS;
+        // Two ways to be confident this is a local external write rather
+        // than a sync delivery from mobile:
+        //   (1) The canonical is far enough behind stat.mtime that it
+        //       can't be a sync follow-up to the same logical edit.
+        //   (2) This file was actively being edited in Obsidian on this
+        //       device recently — Mac → Claude follow-ups land here even
+        //       when the mtime advance is small.
+        if (
+          mtimeAdvance > EXTERNAL_SYNC_GUARD_MS ||
+          recentLocalEditorChange
+        ) {
+          this.editTimes[file.path] = file.stat.mtime;
+        }
+        // Otherwise: small mtime advance, no recent local Obsidian
+        // activity on this file — preserve canonical (probably sync).
       }
     }
     this.scheduleSaveData();
