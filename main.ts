@@ -15,12 +15,15 @@ import {
   setIcon,
 } from "obsidian";
 
+type PathCopyAffordance = "button" | "path-text" | "both";
+
 interface RecentEditsSettings {
   excludedFolders: string[];
   backgroundFolders: string[];
   lookbackDays: number;
   enableHoverPreview: boolean;
   externalEditColor: string;
+  pathCopyAffordance: PathCopyAffordance;
 }
 
 const DEFAULT_SETTINGS: RecentEditsSettings = {
@@ -29,6 +32,7 @@ const DEFAULT_SETTINGS: RecentEditsSettings = {
   lookbackDays: 7,
   enableHoverPreview: false,
   externalEditColor: "#D97757",
+  pathCopyAffordance: "button",
 };
 
 const VIEW_TYPE_RECENT_EDITS = "recent-edits-view";
@@ -43,6 +47,7 @@ type EditSource = "obsidian" | "external";
 export default class RecentEditsPlugin extends Plugin {
   settings: RecentEditsSettings = DEFAULT_SETTINGS;
   editSources: Record<string, EditSource> = {};
+  editTimes: Record<string, number> = {};
   dismissedAt: Record<string, number> = {};
   private editorChangeTimes = new Map<string, number>();
   private recentFileOpens = new Map<string, number>();
@@ -118,6 +123,10 @@ export default class RecentEditsPlugin extends Plugin {
             delete this.editSources[file.path];
             changed = true;
           }
+          if (this.editTimes[file.path] !== undefined) {
+            delete this.editTimes[file.path];
+            changed = true;
+          }
           if (this.dismissedAt[file.path] !== undefined) {
             delete this.dismissedAt[file.path];
             changed = true;
@@ -137,6 +146,11 @@ export default class RecentEditsPlugin extends Plugin {
             delete this.editSources[oldPath];
             changed = true;
           }
+          if (this.editTimes[oldPath] !== undefined) {
+            this.editTimes[file.path] = this.editTimes[oldPath];
+            delete this.editTimes[oldPath];
+            changed = true;
+          }
           if (this.dismissedAt[oldPath] !== undefined) {
             this.dismissedAt[file.path] = this.dismissedAt[oldPath];
             delete this.dismissedAt[oldPath];
@@ -145,6 +159,18 @@ export default class RecentEditsPlugin extends Plugin {
           if (changed) this.scheduleSaveData();
         }
         this.refreshViews();
+      })
+    );
+
+    // Re-load persisted edit metadata when the Recent Edits leaf becomes
+    // active. data.json may have been updated by Obsidian Sync from another
+    // device while the view was inactive, and Obsidian doesn't fire vault
+    // events for files inside `.obsidian/`.
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", (leaf) => {
+        if (leaf && leaf.view instanceof RecentEditsView) {
+          this.reloadEditMetadata();
+        }
       })
     );
 
@@ -164,11 +190,22 @@ export default class RecentEditsPlugin extends Plugin {
     const recentFileOpen = Date.now() - lastOpen < FILE_OPEN_WINDOW_MS;
     const isObsidian = recentEditorChange || isEmptyCreate || recentFileOpen;
     this.editSources[file.path] = isObsidian ? "obsidian" : "external";
+    // Only the originating device records canonical mtime. External
+    // classifications never write, so a sync delivery on mobile (which
+    // classifies as external and carries a sync-receipt-time stat.mtime)
+    // doesn't clobber the canonical value Mac wrote.
+    if (isObsidian) {
+      this.editTimes[file.path] = file.stat.mtime;
+    }
     this.scheduleSaveData();
   }
 
   isExternalEdit(file: TFile): boolean {
     return this.editSources[file.path] === "external";
+  }
+
+  effectiveMtime(file: TFile): number {
+    return this.editTimes[file.path] ?? file.stat.mtime;
   }
 
   isDismissed(file: TFile): boolean {
@@ -217,11 +254,15 @@ export default class RecentEditsPlugin extends Plugin {
     const editSources = (raw._editSources as
       | Record<string, EditSource>
       | undefined) ?? {};
+    const editTimes = (raw._editTimes as
+      | Record<string, number>
+      | undefined) ?? {};
     const dismissedAt = (raw._dismissedAt as
       | Record<string, number>
       | undefined) ?? {};
     const settingsBlob = { ...raw };
     delete (settingsBlob as Record<string, unknown>)._editSources;
+    delete (settingsBlob as Record<string, unknown>)._editTimes;
     delete (settingsBlob as Record<string, unknown>)._dismissedAt;
 
     this.settings = Object.assign(
@@ -230,7 +271,28 @@ export default class RecentEditsPlugin extends Plugin {
       settingsBlob as Partial<RecentEditsSettings>
     );
     this.editSources = editSources;
+    this.editTimes = editTimes;
     this.dismissedAt = dismissedAt;
+  }
+
+  // Re-reads persisted edit metadata (sources, times, dismissals) from
+  // data.json without disturbing in-memory settings. Used to pick up
+  // changes synced in from another device.
+  async reloadEditMetadata() {
+    const raw = ((await this.loadData()) as Record<string, unknown>) ?? {};
+    const editSources = (raw._editSources as
+      | Record<string, EditSource>
+      | undefined) ?? {};
+    const editTimes = (raw._editTimes as
+      | Record<string, number>
+      | undefined) ?? {};
+    const dismissedAt = (raw._dismissedAt as
+      | Record<string, number>
+      | undefined) ?? {};
+    this.editSources = editSources;
+    this.editTimes = editTimes;
+    this.dismissedAt = dismissedAt;
+    this.refreshViews();
   }
 
   async saveSettings() {
@@ -250,14 +312,33 @@ export default class RecentEditsPlugin extends Plugin {
 
   private async persistData() {
     const cutoff = Date.now() - this.settings.lookbackDays * 86400000;
+    // For pruning, use whichever timestamp is later: local stat.mtime or
+    // the stored canonical mtime. On mobile, stat.mtime may be sync time
+    // (newer than the canonical mtime), so we keep the entry. An entry is
+    // only dropped if the file genuinely fell out of the lookback window
+    // by every measure.
+    const freshest = (path: string, file: TFile): number => {
+      const stored = this.editTimes[path];
+      return stored !== undefined ? Math.max(stored, file.stat.mtime) : file.stat.mtime;
+    };
+
     const prunedSources: Record<string, EditSource> = {};
     for (const [path, src] of Object.entries(this.editSources)) {
       const file = this.app.vault.getAbstractFileByPath(path);
-      if (file instanceof TFile && file.stat.mtime >= cutoff) {
+      if (file instanceof TFile && freshest(path, file) >= cutoff) {
         prunedSources[path] = src;
       }
     }
     this.editSources = prunedSources;
+
+    const prunedTimes: Record<string, number> = {};
+    for (const [path, mtime] of Object.entries(this.editTimes)) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof TFile && Math.max(mtime, file.stat.mtime) >= cutoff) {
+        prunedTimes[path] = mtime;
+      }
+    }
+    this.editTimes = prunedTimes;
 
     // Prune dismissals: drop entries for files that no longer exist, are
     // outside the lookback window, or whose mtime has advanced past the
@@ -278,6 +359,7 @@ export default class RecentEditsPlugin extends Plugin {
     await this.saveData({
       ...this.settings,
       _editSources: this.editSources,
+      _editTimes: this.editTimes,
       _dismissedAt: this.dismissedAt,
     });
   }
@@ -313,6 +395,9 @@ class RecentEditsView extends ItemView {
   }
 
   async onOpen() {
+    // Pick up any persisted edit metadata that arrived via Obsidian Sync
+    // since the last time this view rendered.
+    await this.plugin.reloadEditMetadata();
     this.render();
   }
 
@@ -444,7 +529,10 @@ class RecentEditsView extends ItemView {
     const all = this.app.vault.getFiles();
     const filtered = all.filter((f) => {
       if (!SUPPORTED_EXTENSIONS.has(f.extension)) return false;
-      if (f.stat.mtime < cutoff) return false;
+      // Use the later of stat.mtime and the persisted canonical mtime so a
+      // file remains visible if either signal places it inside the window.
+      const effective = this.plugin.effectiveMtime(f);
+      if (Math.max(f.stat.mtime, effective) < cutoff) return false;
 
       const segs = f.path.split("/");
       for (let i = 0; i < segs.length - 1; i++) {
@@ -467,7 +555,7 @@ class RecentEditsView extends ItemView {
 
     const groupsMap = new Map<string, DayGroup>();
     for (const f of filtered) {
-      const d = new Date(f.stat.mtime);
+      const d = new Date(this.plugin.effectiveMtime(f));
       const key = formatDayKey(d);
       let g = groupsMap.get(key);
       if (!g) {
@@ -480,7 +568,10 @@ class RecentEditsView extends ItemView {
     const groups = Array.from(groupsMap.values());
     groups.sort((a, b) => b.date.getTime() - a.date.getTime());
     for (const g of groups) {
-      g.files.sort((a, b) => b.stat.mtime - a.stat.mtime);
+      g.files.sort(
+        (a, b) =>
+          this.plugin.effectiveMtime(b) - this.plugin.effectiveMtime(a)
+      );
     }
     return groups;
   }
@@ -603,8 +694,13 @@ class RecentEditsView extends ItemView {
       cls: "recent-edits-row-path",
       text: displayPath,
     });
-    pathEl.setAttribute("aria-label", "Click to copy absolute path");
-    pathEl.addEventListener("click", async (evt) => {
+
+    const affordance = this.plugin.settings.pathCopyAffordance;
+    const showButton = affordance === "button" || affordance === "both";
+    const pathTextIsCopyTarget =
+      affordance === "path-text" || affordance === "both";
+
+    const copyAbsolutePath = async (evt: Event) => {
       evt.stopPropagation();
       const adapter = this.app.vault.adapter;
       if (adapter instanceof FileSystemAdapter) {
@@ -614,11 +710,37 @@ class RecentEditsView extends ItemView {
       } else {
         new Notice("Absolute path unavailable on this platform");
       }
-    });
+    };
 
-    row.createSpan({
+    if (pathTextIsCopyTarget) {
+      pathEl.addClass("is-copy-target");
+      pathEl.setAttribute("aria-label", "Click to copy absolute path");
+      pathEl.addEventListener("click", copyAbsolutePath);
+    }
+
+    const meta = row.createDiv({ cls: "recent-edits-row-meta" });
+    if (showButton) {
+      meta.addClass("has-button");
+      const btn = meta.createDiv({
+        cls: "recent-edits-row-copy-btn",
+        attr: {
+          role: "button",
+          tabindex: "0",
+          "aria-label": "Copy absolute path",
+        },
+      });
+      setIcon(btn, "link");
+      btn.addEventListener("click", copyAbsolutePath);
+      btn.addEventListener("keydown", (evt) => {
+        if (evt.key === "Enter" || evt.key === " ") {
+          evt.preventDefault();
+          copyAbsolutePath(evt);
+        }
+      });
+    }
+    meta.createSpan({
       cls: "recent-edits-row-time",
-      text: formatTime12h(new Date(file.stat.mtime)),
+      text: formatTime12h(new Date(this.plugin.effectiveMtime(file))),
     });
 
     row.addEventListener("click", (evt) => {
@@ -709,6 +831,24 @@ class RecentEditsSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.externalEditColor)
           .onChange(async (val) => {
             this.plugin.settings.externalEditColor = val;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Copy absolute path affordance")
+      .setDesc(
+        "How to expose the 'copy absolute path to clipboard' action on each row. The button is an explicit, always-visible target; the folder-path text is a subtler invisible affordance. Use Both to expose both."
+      )
+      .addDropdown((dd) =>
+        dd
+          .addOption("button", "Button above the time")
+          .addOption("path-text", "Folder-path text")
+          .addOption("both", "Both")
+          .setValue(this.plugin.settings.pathCopyAffordance)
+          .onChange(async (val) => {
+            this.plugin.settings.pathCopyAffordance =
+              val as PathCopyAffordance;
             await this.plugin.saveSettings();
           })
       );

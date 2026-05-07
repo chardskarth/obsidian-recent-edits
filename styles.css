@@ -183,24 +183,74 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  cursor: pointer;
   transition: color 80ms ease;
 }
 
-.recent-edits-row-path:hover {
+.recent-edits-row-path.is-copy-target {
+  cursor: pointer;
+}
+
+.recent-edits-row-path.is-copy-target:hover {
   color: var(--text-normal);
 }
 
-.recent-edits-row-path:active {
+.recent-edits-row-path.is-copy-target:active {
   color: var(--text-accent);
 }
 
-.recent-edits-row-time {
+.recent-edits-row-meta {
   flex: 0 0 auto;
-  align-self: flex-end;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.recent-edits-row-meta.has-button {
+  justify-content: space-between;
+}
+
+.recent-edits-row-time {
   font-size: var(--font-ui-smaller);
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
+}
+
+.recent-edits-row-copy-btn {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  box-shadow: none;
+  transition: color 80ms ease;
+}
+
+.recent-edits-row-copy-btn:hover {
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-normal);
+}
+
+.recent-edits-row-copy-btn:active {
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-accent);
+}
+
+.recent-edits-row-copy-btn:focus,
+.recent-edits-row-copy-btn:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.recent-edits-row-copy-btn .svg-icon {
+  width: 14px;
+  height: 14px;
 }
 
 /* Settings */
