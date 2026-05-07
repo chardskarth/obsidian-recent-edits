@@ -5,6 +5,7 @@ import {
   Menu,
   Modal,
   Notice,
+  Platform,
   Plugin,
   PluginSettingTab,
   Setting,
@@ -39,6 +40,14 @@ const VIEW_TYPE_RECENT_EDITS = "recent-edits-view";
 const SUPPORTED_EXTENSIONS = new Set(["md", "canvas", "base"]);
 const HOVER_SOURCE = "recent-edits";
 const EDITOR_CHANGE_WINDOW_MS = 5000;
+// Longer window used to decide whether an external edit is a local Claude
+// follow-up to recent Obsidian editing on this file (vs. a sync delivery).
+const ACTIVE_LOCAL_FILE_WINDOW_MS = 5 * 60 * 1000;
+// Threshold for "the canonical mtime is far enough behind stat.mtime that
+// this is clearly a new edit, not a sync follow-up." Keeps us from
+// overwriting Mac's canonical with a sync-receipt time when sync delivers
+// a file from mobile shortly after mobile edited it.
+const EXTERNAL_SYNC_GUARD_MS = 60_000;
 const FILE_OPEN_WINDOW_MS = 2000;
 const CREATE_CLASSIFY_DELAY_MS = 800;
 
@@ -190,12 +199,52 @@ export default class RecentEditsPlugin extends Plugin {
     const recentFileOpen = Date.now() - lastOpen < FILE_OPEN_WINDOW_MS;
     const isObsidian = recentEditorChange || isEmptyCreate || recentFileOpen;
     this.editSources[file.path] = isObsidian ? "obsidian" : "external";
-    // Only the originating device records canonical mtime. External
-    // classifications never write, so a sync delivery on mobile (which
-    // classifies as external and carries a sync-receipt-time stat.mtime)
-    // doesn't clobber the canonical value Mac wrote.
+    // editTimes records the canonical mtime so the panel orders files by
+    // their original edit time, not by sync-receipt time on devices that
+    // received the file via Obsidian Sync.
+    //
+    // Obsidian classifications always reflect a local edit — record them.
+    //
+    // External classifications are ambiguous: on desktop they're almost
+    // always a local filesystem write (Claude Code, a script, etc.); on
+    // mobile they're almost always a sync delivery from another device
+    // carrying a sync-receipt-time stat.mtime. We split by platform:
+    //
+    //   Desktop: write editTimes for external edits so the panel reflects
+    //   the actual edit time. Guard against the rare case where a sync
+    //   delivery from mobile arrives — if a canonical value already exists
+    //   and stat.mtime is within ~60s of it, treat as sync delivery and
+    //   skip to preserve the canonical.
+    //
+    //   Mobile: never write on external. A sync delivery would otherwise
+    //   overwrite Mac's canonical with sync-receipt time.
     if (isObsidian) {
       this.editTimes[file.path] = file.stat.mtime;
+    } else if (Platform.isDesktop) {
+      const persisted = this.editTimes[file.path];
+      if (persisted === undefined) {
+        // No canonical yet — safe to record.
+        this.editTimes[file.path] = file.stat.mtime;
+      } else {
+        const mtimeAdvance = file.stat.mtime - persisted;
+        const recentLocalEditorChange =
+          Date.now() - lastChange < ACTIVE_LOCAL_FILE_WINDOW_MS;
+        // Two ways to be confident this is a local external write rather
+        // than a sync delivery from mobile:
+        //   (1) The canonical is far enough behind stat.mtime that it
+        //       can't be a sync follow-up to the same logical edit.
+        //   (2) This file was actively being edited in Obsidian on this
+        //       device recently — Mac → Claude follow-ups land here even
+        //       when the mtime advance is small.
+        if (
+          mtimeAdvance > EXTERNAL_SYNC_GUARD_MS ||
+          recentLocalEditorChange
+        ) {
+          this.editTimes[file.path] = file.stat.mtime;
+        }
+        // Otherwise: small mtime advance, no recent local Obsidian
+        // activity on this file — preserve canonical (probably sync).
+      }
     }
     this.scheduleSaveData();
   }
