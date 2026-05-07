@@ -15,12 +15,15 @@ import {
   setIcon,
 } from "obsidian";
 
+type PathCopyAffordance = "button" | "path-text" | "both";
+
 interface RecentEditsSettings {
   excludedFolders: string[];
   backgroundFolders: string[];
   lookbackDays: number;
   enableHoverPreview: boolean;
   externalEditColor: string;
+  pathCopyAffordance: PathCopyAffordance;
 }
 
 const DEFAULT_SETTINGS: RecentEditsSettings = {
@@ -29,6 +32,7 @@ const DEFAULT_SETTINGS: RecentEditsSettings = {
   lookbackDays: 7,
   enableHoverPreview: false,
   externalEditColor: "#D97757",
+  pathCopyAffordance: "button",
 };
 
 const VIEW_TYPE_RECENT_EDITS = "recent-edits-view";
@@ -690,8 +694,13 @@ class RecentEditsView extends ItemView {
       cls: "recent-edits-row-path",
       text: displayPath,
     });
-    pathEl.setAttribute("aria-label", "Click to copy absolute path");
-    pathEl.addEventListener("click", async (evt) => {
+
+    const affordance = this.plugin.settings.pathCopyAffordance;
+    const showButton = affordance === "button" || affordance === "both";
+    const pathTextIsCopyTarget =
+      affordance === "path-text" || affordance === "both";
+
+    const copyAbsolutePath = async (evt: Event) => {
       evt.stopPropagation();
       const adapter = this.app.vault.adapter;
       if (adapter instanceof FileSystemAdapter) {
@@ -701,9 +710,35 @@ class RecentEditsView extends ItemView {
       } else {
         new Notice("Absolute path unavailable on this platform");
       }
-    });
+    };
 
-    row.createSpan({
+    if (pathTextIsCopyTarget) {
+      pathEl.addClass("is-copy-target");
+      pathEl.setAttribute("aria-label", "Click to copy absolute path");
+      pathEl.addEventListener("click", copyAbsolutePath);
+    }
+
+    const meta = row.createDiv({ cls: "recent-edits-row-meta" });
+    if (showButton) {
+      meta.addClass("has-button");
+      const btn = meta.createDiv({
+        cls: "recent-edits-row-copy-btn",
+        attr: {
+          role: "button",
+          tabindex: "0",
+          "aria-label": "Copy absolute path",
+        },
+      });
+      setIcon(btn, "link");
+      btn.addEventListener("click", copyAbsolutePath);
+      btn.addEventListener("keydown", (evt) => {
+        if (evt.key === "Enter" || evt.key === " ") {
+          evt.preventDefault();
+          copyAbsolutePath(evt);
+        }
+      });
+    }
+    meta.createSpan({
       cls: "recent-edits-row-time",
       text: formatTime12h(new Date(this.plugin.effectiveMtime(file))),
     });
@@ -796,6 +831,24 @@ class RecentEditsSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.externalEditColor)
           .onChange(async (val) => {
             this.plugin.settings.externalEditColor = val;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Copy absolute path affordance")
+      .setDesc(
+        "How to expose the 'copy absolute path to clipboard' action on each row. The button is an explicit, always-visible target; the folder-path text is a subtler invisible affordance. Use Both to expose both."
+      )
+      .addDropdown((dd) =>
+        dd
+          .addOption("button", "Button above the time")
+          .addOption("path-text", "Folder-path text")
+          .addOption("both", "Both")
+          .setValue(this.plugin.settings.pathCopyAffordance)
+          .onChange(async (val) => {
+            this.plugin.settings.pathCopyAffordance =
+              val as PathCopyAffordance;
             await this.plugin.saveSettings();
           })
       );
