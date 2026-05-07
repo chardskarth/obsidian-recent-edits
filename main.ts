@@ -5,6 +5,7 @@ import {
   Menu,
   Modal,
   Notice,
+  Platform,
   Plugin,
   PluginSettingTab,
   Setting,
@@ -190,12 +191,34 @@ export default class RecentEditsPlugin extends Plugin {
     const recentFileOpen = Date.now() - lastOpen < FILE_OPEN_WINDOW_MS;
     const isObsidian = recentEditorChange || isEmptyCreate || recentFileOpen;
     this.editSources[file.path] = isObsidian ? "obsidian" : "external";
-    // Only the originating device records canonical mtime. External
-    // classifications never write, so a sync delivery on mobile (which
-    // classifies as external and carries a sync-receipt-time stat.mtime)
-    // doesn't clobber the canonical value Mac wrote.
+    // editTimes records the canonical mtime so the panel orders files by
+    // their original edit time, not by sync-receipt time on devices that
+    // received the file via Obsidian Sync.
+    //
+    // Obsidian classifications always reflect a local edit — record them.
+    //
+    // External classifications are ambiguous: on desktop they're almost
+    // always a local filesystem write (Claude Code, a script, etc.); on
+    // mobile they're almost always a sync delivery from another device
+    // carrying a sync-receipt-time stat.mtime. We split by platform:
+    //
+    //   Desktop: write editTimes for external edits so the panel reflects
+    //   the actual edit time. Guard against the rare case where a sync
+    //   delivery from mobile arrives — if a canonical value already exists
+    //   and stat.mtime is within ~60s of it, treat as sync delivery and
+    //   skip to preserve the canonical.
+    //
+    //   Mobile: never write on external. A sync delivery would otherwise
+    //   overwrite Mac's canonical with sync-receipt time.
     if (isObsidian) {
       this.editTimes[file.path] = file.stat.mtime;
+    } else if (Platform.isDesktop) {
+      const persisted = this.editTimes[file.path];
+      const looksLikeSyncDelivery =
+        persisted !== undefined && file.stat.mtime - persisted < 60_000;
+      if (!looksLikeSyncDelivery) {
+        this.editTimes[file.path] = file.stat.mtime;
+      }
     }
     this.scheduleSaveData();
   }
