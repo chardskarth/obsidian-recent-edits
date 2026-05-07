@@ -2,7 +2,7 @@
 
 A sidebar panel for Obsidian that shows files modified in the last *N* days, grouped by calendar day. Marks files edited from outside Obsidian — filesystem writes, sync from another device, plugins that write programmatically — with a configurable indicator dot.
 
-![Recent Edits panel](assets/Recent Edits Screenshot.png)
+![Recent Edits panel](assets/recent-edits-screenshot.png)
 
 ## Why this exists
 
