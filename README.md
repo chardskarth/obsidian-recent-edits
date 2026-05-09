@@ -27,11 +27,14 @@ Recent Edits closes that gap. It shows what changed, when it changed, and visual
 
 ## Install
 
-1. In Obsidian: Settings → Community plugins.
-2. If Restricted mode is on, turn it off.
-3. Click **Browse**, search for `Recent Edits`, and click **Install**.
-4. Enable **Recent Edits** in the Community plugins list.
-5. Click the clock/history ribbon icon, or run **Open Recent Edits panel** from the command palette.
+### Via BRAT (recommended for now)
+
+1. Install the [BRAT plugin](https://github.com/TfTHacker/obsidian42-brat) from the Community plugins directory.
+2. In Obsidian: Settings → BRAT → **Add Beta plugin**.
+3. Paste: `cwagner223355/obsidian-recent-edits`
+4. Enable **Recent Edits** in Community plugins.
+
+Knox Timeline is not yet in the Community plugins directory.
 
 ## Settings
 
