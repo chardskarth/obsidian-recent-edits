@@ -394,7 +394,7 @@ export default class RecentEditsPlugin extends Plugin {
       window.clearTimeout(this.saveDataTimer);
     }
     this.saveDataTimer = window.setTimeout(() => {
-      this.persistData();
+      void this.persistData();
       this.saveDataTimer = null;
     }, 500);
   }
@@ -804,7 +804,7 @@ class RecentEditsView extends ItemView {
     if (pathTextIsCopyTarget) {
       pathEl.addClass("is-copy-target");
       pathEl.setAttribute("aria-label", "Click to copy absolute path");
-      pathEl.addEventListener("click", copyAbsolutePath);
+      pathEl.addEventListener("click", (evt) => { void copyAbsolutePath(evt); });
     }
 
     const meta = row.createDiv({ cls: "recent-edits-row-meta" });
@@ -819,11 +819,11 @@ class RecentEditsView extends ItemView {
         },
       });
       setIcon(btn, "link");
-      btn.addEventListener("click", copyAbsolutePath);
+      btn.addEventListener("click", (evt) => { void copyAbsolutePath(evt); });
       btn.addEventListener("keydown", (evt) => {
         if (evt.key === "Enter" || evt.key === " ") {
           evt.preventDefault();
-          copyAbsolutePath(evt);
+          void copyAbsolutePath(evt);
         }
       });
     }
@@ -956,7 +956,7 @@ class RecentEditsSettingTab extends PluginSettingTab {
 
     this.addFolderListSetting(containerEl, {
       name: "Excluded folders",
-      desc: "Folders hidden from the list completely. Dot-prefixed folders (.obsidian, .trash) are always excluded.",
+      desc: `Folders hidden from the list completely. Dot-prefixed folders (${this.app.vault.configDir}, .trash) are always excluded.`,
       getValue: () => this.plugin.settings.excludedFolders,
       setValue: async (v) => {
         this.plugin.settings.excludedFolders = v;
