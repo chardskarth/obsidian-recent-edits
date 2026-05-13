@@ -72,13 +72,13 @@ export default class RecentEditsPlugin extends Plugin {
     );
 
     this.addRibbonIcon("history", "Recent Edits", () => {
-      this.activateView();
+      void this.activateView();
     });
 
     this.addCommand({
-      id: "open-recent-edits",
-      name: "Open Recent Edits panel",
-      callback: () => this.activateView(),
+      id: "open",
+      name: "Open panel",
+      callback: () => { void this.activateView(); },
     });
 
     this.registerEvent(
@@ -179,7 +179,7 @@ export default class RecentEditsPlugin extends Plugin {
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
         if (leaf && leaf.view instanceof RecentEditsView) {
-          this.reloadEditMetadata();
+          void this.reloadEditMetadata();
         }
       })
     );
@@ -324,7 +324,7 @@ export default class RecentEditsPlugin extends Plugin {
       }
     }
 
-    if (leaf) workspace.revealLeaf(leaf);
+    if (leaf) await workspace.revealLeaf(leaf);
   }
 
   refreshViews() {
@@ -505,7 +505,7 @@ class RecentEditsView extends ItemView {
         .setTitle("Open in new tab")
         .setIcon("lucide-file-plus")
         .onClick(() => {
-          workspace.getLeaf("tab").openFile(file);
+          void workspace.getLeaf("tab").openFile(file);
         })
     );
 
@@ -514,7 +514,7 @@ class RecentEditsView extends ItemView {
         .setTitle("Open to the right")
         .setIcon("lucide-separator-vertical")
         .onClick(() => {
-          workspace.getLeaf("split", "vertical").openFile(file);
+          void workspace.getLeaf("split", "vertical").openFile(file);
         })
     );
 
@@ -523,7 +523,7 @@ class RecentEditsView extends ItemView {
         .setTitle("Open in new window")
         .setIcon("lucide-monitor")
         .onClick(() => {
-          workspace.getLeaf("window").openFile(file);
+          void workspace.getLeaf("window").openFile(file);
         })
     );
 
@@ -535,8 +535,8 @@ class RecentEditsView extends ItemView {
       item
         .setTitle("Copy path")
         .setIcon("lucide-copy")
-        .onClick(async () => {
-          await navigator.clipboard.writeText(file.path);
+        .onClick(() => {
+          void navigator.clipboard.writeText(file.path);
         })
     );
 
@@ -841,7 +841,7 @@ class RecentEditsView extends ItemView {
           return;
         }
       }
-      this.openInNewTab(file);
+      void this.openInNewTab(file);
     });
 
     row.addEventListener("contextmenu", (evt) => {
@@ -875,8 +875,6 @@ class RecentEditsSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.addClass("recent-edits-settings");
-
-    new Setting(containerEl).setName("General").setHeading();
 
     new Setting(containerEl)
       .setName("Lookback days")
@@ -1011,9 +1009,8 @@ class RecentEditsSettingTab extends PluginSettingTab {
           text: "×",
         });
         x.setAttribute("aria-label", `Remove ${folder}`);
-        x.addEventListener("click", async () => {
-          await opts.setValue(opts.getValue().filter((f) => f !== folder));
-          renderChips();
+        x.addEventListener("click", () => {
+          void opts.setValue(opts.getValue().filter((f) => f !== folder)).then(() => renderChips());
         });
       }
     };
@@ -1059,11 +1056,11 @@ class RecentEditsSettingTab extends PluginSettingTab {
       input.value = "";
       input.focus();
     };
-    addBtn.addEventListener("click", addCurrent);
+    addBtn.addEventListener("click", () => { void addCurrent(); });
     input.addEventListener("keydown", (evt) => {
       if (evt.key === "Enter") {
         evt.preventDefault();
-        addCurrent();
+        void addCurrent();
       }
     });
   }
@@ -1144,12 +1141,12 @@ class RenameFileModal extends Modal {
       this.close();
     };
 
-    renameBtn.addEventListener("click", submit);
+    renameBtn.addEventListener("click", () => { void submit(); });
     cancelBtn.addEventListener("click", () => this.close());
     inputEl.addEventListener("keydown", (evt) => {
       if (evt.key === "Enter") {
         evt.preventDefault();
-        submit();
+        void submit();
       } else if (evt.key === "Escape") {
         evt.preventDefault();
         this.close();
@@ -1190,9 +1187,8 @@ class ConfirmDeleteModal extends Modal {
       text: "Delete",
     });
 
-    deleteBtn.addEventListener("click", async () => {
-      await this.app.vault.trash(this.file, true);
-      this.close();
+    deleteBtn.addEventListener("click", () => {
+      void this.app.fileManager.trashFile(this.file).then(() => this.close());
     });
     cancelBtn.addEventListener("click", () => this.close());
   }
