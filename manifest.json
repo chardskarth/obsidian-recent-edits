@@ -3,7 +3,7 @@
   "name": "Recent Edits",
   "version": "1.2.1",
   "minAppVersion": "1.7.2",
-  "description": "Shows files modified in the last N days, grouped by day. Marks edits made from outside Obsidian (filesystem writes, sync, plugins) with a configurable indicator.",
+  "description": "Shows files modified in the last N days, grouped by day. Marks edits made from filesystem writes with a configurable indicator.",
   "author": "Chris Wagner",
   "authorUrl": "https://github.com/cwagner223355",
   "fundingUrl": "https://ko-fi.com/S6S6Z9TE1",
