@@ -27,7 +27,15 @@ Recent Edits closes that gap. It shows what changed, when it changed, and visual
 
 ## Install
 
-### Via BRAT (recommended for now)
+### Plugin Directory
+1. Open Obsidian → Settings (⌘,) → Community plugins
+2. If you see "Restricted mode is on", click Turn on community plugins
+3. Click Browse
+4. Search "Recent Edits"
+5. Click Install → then Enable
+6. Open the panel via the History ribbon icon, or Cmd-P → "Recent Edits: Open panel"
+
+### Via BRAT (For Pre-release Betas)
 
 1. Install the [BRAT plugin](https://github.com/TfTHacker/obsidian42-brat) from the Community plugins directory.
 2. In Obsidian: Settings → BRAT → **Add Beta plugin**.
