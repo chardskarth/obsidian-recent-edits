@@ -5,7 +5,6 @@ import {
   Menu,
   Modal,
   Notice,
-  Platform,
   Plugin,
   PluginSettingTab,
   Setting,
@@ -23,7 +22,6 @@ interface RecentEditsSettings {
   backgroundFolders: string[];
   lookbackDays: number;
   enableHoverPreview: boolean;
-  externalEditColor: string;
   pathCopyAffordance: PathCopyAffordance;
 }
 
@@ -32,35 +30,27 @@ const DEFAULT_SETTINGS: RecentEditsSettings = {
   backgroundFolders: [],
   lookbackDays: 7,
   enableHoverPreview: false,
-  externalEditColor: "#D97757",
   pathCopyAffordance: "button",
 };
 
 const VIEW_TYPE_RECENT_EDITS = "recent-edits-view";
 const SUPPORTED_EXTENSIONS = new Set(["md", "canvas", "base"]);
 const HOVER_SOURCE = "recent-edits";
-const EDITOR_CHANGE_WINDOW_MS = 5000;
-// Longer window used to decide whether an external edit is a local Claude
-// follow-up to recent Obsidian editing on this file (vs. a sync delivery).
-const ACTIVE_LOCAL_FILE_WINDOW_MS = 5 * 60 * 1000;
-// Threshold for "the canonical mtime is far enough behind stat.mtime that
-// this is clearly a new edit, not a sync follow-up." Keeps us from
-// overwriting Mac's canonical with a sync-receipt time when sync delivers
-// a file from mobile shortly after mobile edited it.
-const EXTERNAL_SYNC_GUARD_MS = 60_000;
-const FILE_OPEN_WINDOW_MS = 2000;
-const CREATE_CLASSIFY_DELAY_MS = 800;
 
-type EditSource = "obsidian" | "external";
+interface FileEntry {
+  file: TFile;
+  timestamp: number;
+  isCreatedDate: boolean;
+}
+
+interface DayGroup {
+  key: string;
+  date: Date;
+  files: FileEntry[];
+}
 
 export default class RecentEditsPlugin extends Plugin {
   settings: RecentEditsSettings = DEFAULT_SETTINGS;
-  editSources: Record<string, EditSource> = {};
-  editTimes: Record<string, number> = {};
-  dismissedAt: Record<string, number> = {};
-  private editorChangeTimes = new Map<string, number>();
-  private recentFileOpens = new Map<string, number>();
-  private saveDataTimer: number | null = null;
   private midnightTimer: number | null = null;
 
   async onload() {
@@ -81,114 +71,8 @@ export default class RecentEditsPlugin extends Plugin {
       callback: () => { void this.activateView(); },
     });
 
-    this.registerEvent(
-      this.app.workspace.on("editor-change", (_editor, info) => {
-        const file = (info as { file?: TFile | null })?.file;
-        if (file && file.path) {
-          this.editorChangeTimes.set(file.path, Date.now());
-        }
-      })
-    );
-
-    this.registerEvent(
-      this.app.workspace.on("file-open", (file) => {
-        if (file && file.path) {
-          this.recentFileOpens.set(file.path, Date.now());
-        }
-      })
-    );
-
-    this.registerEvent(
-      this.app.vault.on("create", (file) => {
-        if (file instanceof TFile) {
-          // Defer classification so workspace `file-open` has time to fire.
-          // Core-plugin flows (Daily Notes, Templater, "New note from
-          // template") create the file then open it; the file-open is
-          // our signal that this was an Obsidian-internal create.
-          window.setTimeout(() => {
-            if (this.app.vault.getAbstractFileByPath(file.path) === file) {
-              this.classifyEdit(file, true);
-              this.refreshViews();
-            }
-          }, CREATE_CLASSIFY_DELAY_MS);
-        }
-        this.refreshViews();
-      })
-    );
-
-    this.registerEvent(
-      this.app.vault.on("modify", (file) => {
-        if (file instanceof TFile) {
-          this.classifyEdit(file, false);
-        }
-        this.refreshViews();
-      })
-    );
-
-    this.registerEvent(
-      this.app.vault.on("delete", (file) => {
-        if (file instanceof TFile) {
-          let changed = false;
-          if (this.editSources[file.path]) {
-            delete this.editSources[file.path];
-            changed = true;
-          }
-          if (this.editTimes[file.path] !== undefined) {
-            delete this.editTimes[file.path];
-            changed = true;
-          }
-          if (this.dismissedAt[file.path] !== undefined) {
-            delete this.dismissedAt[file.path];
-            changed = true;
-          }
-          if (changed) this.scheduleSaveData();
-        }
-        this.refreshViews();
-      })
-    );
-
-    this.registerEvent(
-      this.app.vault.on("rename", (file, oldPath) => {
-        if (file instanceof TFile) {
-          let changed = false;
-          if (this.editSources[oldPath]) {
-            this.editSources[file.path] = this.editSources[oldPath];
-            delete this.editSources[oldPath];
-            changed = true;
-          }
-          if (this.editTimes[oldPath] !== undefined) {
-            this.editTimes[file.path] = this.editTimes[oldPath];
-            delete this.editTimes[oldPath];
-            changed = true;
-          }
-          if (this.dismissedAt[oldPath] !== undefined) {
-            this.dismissedAt[file.path] = this.dismissedAt[oldPath];
-            delete this.dismissedAt[oldPath];
-            changed = true;
-          }
-          if (changed) this.scheduleSaveData();
-        }
-        this.refreshViews();
-      })
-    );
-
-    // Re-load persisted edit metadata when the Recent Edits leaf becomes
-    // active. data.json may have been updated by Obsidian Sync from another
-    // device while the view was inactive, and Obsidian doesn't fire vault
-    // events for files inside `.obsidian/`.
-    this.registerEvent(
-      this.app.workspace.on("active-leaf-change", (leaf) => {
-        if (leaf && leaf.view instanceof RecentEditsView) {
-          void this.reloadEditMetadata();
-        }
-      })
-    );
-
     this.addSettingTab(new RecentEditsSettingTab(this.app, this));
 
-    // Re-render when the calendar day rolls over so the "Today" group reflects
-    // the new day even when Obsidian was left open overnight with no vault
-    // activity to trigger an event-driven refresh.
     this.scheduleMidnightRefresh();
   }
 
@@ -221,90 +105,129 @@ export default class RecentEditsPlugin extends Plugin {
     }, delay);
   }
 
-  private classifyEdit(file: TFile, isCreate: boolean) {
-    const lastChange = this.editorChangeTimes.get(file.path) ?? 0;
-    const recentEditorChange =
-      Date.now() - lastChange < EDITOR_CHANGE_WINDOW_MS;
-    // Empty files at create time are Obsidian-internal (unresolved wikilink
-    // click, "New note" command). External writes always carry content.
-    const isEmptyCreate = isCreate && file.stat.size === 0;
-    // Recent file-open signals a workspace-driven edit (core plugins like
-    // Daily Notes, Templater, command-palette actions that open the file).
-    const lastOpen = this.recentFileOpens.get(file.path) ?? 0;
-    const recentFileOpen = Date.now() - lastOpen < FILE_OPEN_WINDOW_MS;
-    const isObsidian = recentEditorChange || isEmptyCreate || recentFileOpen;
+  private parseFrontmatterDateTime(raw: string): number | null {
+    if (!raw || typeof raw !== "string") return null;
+    const trimmed = raw.trim();
 
-    // Both maps move in lockstep: a write to editSources is also a write to
-    // editTimes. We only persist when this device originated the edit.
-    //
-    // Obsidian classifications always reflect a local edit — record them.
-    //
-    // External classifications are ambiguous: on desktop they're almost
-    // always a local filesystem write (Claude Code, a script, etc.); on
-    // mobile they're almost always a sync delivery from another device
-    // carrying a sync-receipt-time stat.mtime. We split by platform:
-    //
-    //   Desktop: record an external edit as the local canonical when we're
-    //   confident it's a real local write. Guard against the rare case
-    //   where a sync delivery from mobile arrives — if a canonical value
-    //   already exists and stat.mtime is within ~60s of it, treat as sync
-    //   delivery and skip to preserve the canonical.
-    //
-    //   Mobile: never write on external. A sync delivery would otherwise
-    //   overwrite Mac's canonical (both source and time) with sync data.
-    let isLocallyOriginated = false;
-    if (isObsidian) {
-      isLocallyOriginated = true;
-    } else if (Platform.isDesktop) {
-      const persisted = this.editTimes[file.path];
-      if (persisted === undefined) {
-        // No canonical yet — safe to record.
-        isLocallyOriginated = true;
-      } else {
-        const mtimeAdvance = file.stat.mtime - persisted;
-        const recentLocalEditorChange =
-          Date.now() - lastChange < ACTIVE_LOCAL_FILE_WINDOW_MS;
-        // Two ways to be confident this is a local external write rather
-        // than a sync delivery from mobile:
-        //   (1) The canonical is far enough behind stat.mtime that it
-        //       can't be a sync follow-up to the same logical edit.
-        //   (2) This file was actively being edited in Obsidian on this
-        //       device recently — Mac → Claude follow-ups land here even
-        //       when the mtime advance is small.
-        if (mtimeAdvance > EXTERNAL_SYNC_GUARD_MS || recentLocalEditorChange) {
-          isLocallyOriginated = true;
-        }
-        // Otherwise: small mtime advance, no recent local Obsidian
-        // activity on this file — preserve canonical (probably sync).
+    // Try 24h format: "2026-06-08 16:51:59"
+    const match24 = trimmed.match(
+      /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/
+    );
+    if (match24) {
+      const [, y, m, d, h, min, s] = match24;
+      const date = new Date(
+        parseInt(y),
+        parseInt(m) - 1,
+        parseInt(d),
+        parseInt(h),
+        parseInt(min),
+        parseInt(s)
+      );
+      return date.getTime();
+    }
+
+    // Try 12h format: "2026-06-05 11:35 AM"
+    const match12 = trimmed.match(
+      /^(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})\s*(AM|PM)$/i
+    );
+    if (match12) {
+      const [, y, m, d, hStr, min, ampm] = match12;
+      let h = parseInt(hStr);
+      if (ampm.toUpperCase() === "PM" && h < 12) h += 12;
+      if (ampm.toUpperCase() === "AM" && h === 12) h = 0;
+      const date = new Date(
+        parseInt(y),
+        parseInt(m) - 1,
+        parseInt(d),
+        h,
+        parseInt(min),
+        0
+      );
+      return date.getTime();
+    }
+
+    // Try ISO format as fallback
+    const parsed = Date.parse(trimmed);
+    return isNaN(parsed) ? null : parsed;
+  }
+
+  private getFrontmatterDates(file: TFile): { created: number | null; updates: number[] } {
+    const cache = this.app.metadataCache.getFileCache(file);
+    const fm = cache?.frontmatter;
+    if (!fm) return { created: null, updates: [] };
+
+    // Get createdDateTime (case-insensitive)
+    let created: number | null = null;
+    const createdKey = Object.keys(fm).find(
+      (k) => k.toLowerCase() === "createddatetime"
+    );
+    if (createdKey) {
+      created = this.parseFrontmatterDateTime(fm[createdKey]);
+    }
+
+    // Get lastUpdatedDateTimes
+    const updates: number[] = [];
+    const updatesRaw = fm.lastUpdatedDateTimes;
+    if (Array.isArray(updatesRaw)) {
+      for (const entry of updatesRaw) {
+        const ts = this.parseFrontmatterDateTime(String(entry));
+        if (ts !== null) updates.push(ts);
       }
     }
 
-    if (isLocallyOriginated) {
-      this.editSources[file.path] = isObsidian ? "obsidian" : "external";
-      this.editTimes[file.path] = file.stat.mtime;
-      this.scheduleSaveData();
+    return { created, updates };
+  }
+
+  getFileEntries(file: TFile): FileEntry[] {
+    const { created, updates } = this.getFrontmatterDates(file);
+
+    if (created === null && updates.length === 0) return [];
+
+    // Build date map: dateKey -> { timestamp, isCreatedDate }
+    const dateMap = new Map<string, { timestamp: number; isCreatedDate: boolean }>();
+
+    // Get created date key
+    const createdDateKey = created !== null ? formatDayKey(new Date(created)) : null;
+
+    // Add update entries
+    for (const ts of updates) {
+      const dateKey = formatDayKey(new Date(ts));
+      const existing = dateMap.get(dateKey);
+      if (!existing || ts > existing.timestamp) {
+        dateMap.set(dateKey, {
+          timestamp: ts,
+          isCreatedDate: dateKey === createdDateKey,
+        });
+      }
     }
-    // Else: sync delivery (or indistinguishable). Preserve the originating
-    // device's source and canonical mtime; the synced data.json carries
-    // truth.
-  }
 
-  isExternalEdit(file: TFile): boolean {
-    return this.editSources[file.path] === "external";
-  }
+    // Add created entry if not already covered
+    if (created !== null && createdDateKey) {
+      const existing = dateMap.get(createdDateKey);
+      if (!existing) {
+        dateMap.set(createdDateKey, {
+          timestamp: created,
+          isCreatedDate: true,
+        });
+      } else {
+        // Mark as created date
+        existing.isCreatedDate = true;
+      }
+    }
 
-  effectiveMtime(file: TFile): number {
-    return this.editTimes[file.path] ?? file.stat.mtime;
-  }
+    // Convert to FileEntry array
+    const entries: FileEntry[] = [];
+    for (const [, { timestamp, isCreatedDate }] of dateMap) {
+      entries.push({ file, timestamp, isCreatedDate });
+    }
 
-  isDismissed(file: TFile): boolean {
-    return this.dismissedAt[file.path] === file.stat.mtime;
+    // Sort by timestamp descending
+    entries.sort((a, b) => b.timestamp - a.timestamp);
+    return entries;
   }
 
   dismissFile(file: TFile) {
-    this.dismissedAt[file.path] = file.stat.mtime;
-    this.scheduleSaveData();
-    this.refreshViews();
+    new Notice("Not yet implemented");
   }
 
   async activateView() {
@@ -340,15 +263,6 @@ export default class RecentEditsPlugin extends Plugin {
 
   async loadSettings() {
     const raw = ((await this.loadData()) as Record<string, unknown>) ?? {};
-    const editSources = (raw._editSources as
-      | Record<string, EditSource>
-      | undefined) ?? {};
-    const editTimes = (raw._editTimes as
-      | Record<string, number>
-      | undefined) ?? {};
-    const dismissedAt = (raw._dismissedAt as
-      | Record<string, number>
-      | undefined) ?? {};
     const settingsBlob = { ...raw };
     delete (settingsBlob as Record<string, unknown>)._editSources;
     delete (settingsBlob as Record<string, unknown>)._editTimes;
@@ -359,105 +273,12 @@ export default class RecentEditsPlugin extends Plugin {
       DEFAULT_SETTINGS,
       settingsBlob as Partial<RecentEditsSettings>
     );
-    this.editSources = editSources;
-    this.editTimes = editTimes;
-    this.dismissedAt = dismissedAt;
-  }
-
-  // Re-reads persisted edit metadata (sources, times, dismissals) from
-  // data.json without disturbing in-memory settings. Used to pick up
-  // changes synced in from another device.
-  async reloadEditMetadata() {
-    const raw = ((await this.loadData()) as Record<string, unknown>) ?? {};
-    const editSources = (raw._editSources as
-      | Record<string, EditSource>
-      | undefined) ?? {};
-    const editTimes = (raw._editTimes as
-      | Record<string, number>
-      | undefined) ?? {};
-    const dismissedAt = (raw._dismissedAt as
-      | Record<string, number>
-      | undefined) ?? {};
-    this.editSources = editSources;
-    this.editTimes = editTimes;
-    this.dismissedAt = dismissedAt;
-    this.refreshViews();
   }
 
   async saveSettings() {
-    await this.persistData();
+    await this.saveData(this.settings);
     this.refreshViews();
   }
-
-  private scheduleSaveData() {
-    if (this.saveDataTimer !== null) {
-      window.clearTimeout(this.saveDataTimer);
-    }
-    this.saveDataTimer = window.setTimeout(() => {
-      void this.persistData();
-      this.saveDataTimer = null;
-    }, 500);
-  }
-
-  private async persistData() {
-    const cutoff = Date.now() - this.settings.lookbackDays * 86400000;
-    // For pruning, use whichever timestamp is later: local stat.mtime or
-    // the stored canonical mtime. On mobile, stat.mtime may be sync time
-    // (newer than the canonical mtime), so we keep the entry. An entry is
-    // only dropped if the file genuinely fell out of the lookback window
-    // by every measure.
-    const freshest = (path: string, file: TFile): number => {
-      const stored = this.editTimes[path];
-      return stored !== undefined ? Math.max(stored, file.stat.mtime) : file.stat.mtime;
-    };
-
-    const prunedSources: Record<string, EditSource> = {};
-    for (const [path, src] of Object.entries(this.editSources)) {
-      const file = this.app.vault.getAbstractFileByPath(path);
-      if (file instanceof TFile && freshest(path, file) >= cutoff) {
-        prunedSources[path] = src;
-      }
-    }
-    this.editSources = prunedSources;
-
-    const prunedTimes: Record<string, number> = {};
-    for (const [path, mtime] of Object.entries(this.editTimes)) {
-      const file = this.app.vault.getAbstractFileByPath(path);
-      if (file instanceof TFile && Math.max(mtime, file.stat.mtime) >= cutoff) {
-        prunedTimes[path] = mtime;
-      }
-    }
-    this.editTimes = prunedTimes;
-
-    // Prune dismissals: drop entries for files that no longer exist, are
-    // outside the lookback window, or whose mtime has advanced past the
-    // dismissed mtime (the dismissal is stale and would auto-show anyway).
-    const prunedDismissed: Record<string, number> = {};
-    for (const [path, mtime] of Object.entries(this.dismissedAt)) {
-      const file = this.app.vault.getAbstractFileByPath(path);
-      if (
-        file instanceof TFile &&
-        file.stat.mtime >= cutoff &&
-        file.stat.mtime === mtime
-      ) {
-        prunedDismissed[path] = mtime;
-      }
-    }
-    this.dismissedAt = prunedDismissed;
-
-    await this.saveData({
-      ...this.settings,
-      _editSources: this.editSources,
-      _editTimes: this.editTimes,
-      _dismissedAt: this.dismissedAt,
-    });
-  }
-}
-
-interface DayGroup {
-  key: string;
-  date: Date;
-  files: TFile[];
 }
 
 class RecentEditsView extends ItemView {
@@ -484,9 +305,6 @@ class RecentEditsView extends ItemView {
   }
 
   async onOpen() {
-    // Pick up any persisted edit metadata that arrived via Obsidian Sync
-    // since the last time this view rendered.
-    await this.plugin.reloadEditMetadata();
     this.render();
   }
 
@@ -544,7 +362,7 @@ class RecentEditsView extends ItemView {
 
     menu.addItem((item) =>
       item
-        .setTitle("Rename…")
+        .setTitle("Rename...")
         .setIcon("lucide-pencil")
         .onClick(() => {
           new RenameFileModal(this.app, file).open();
@@ -616,51 +434,54 @@ class RecentEditsView extends ItemView {
     };
 
     const all = this.app.vault.getFiles();
-    const filtered = all.filter((f) => {
-      if (!SUPPORTED_EXTENSIONS.has(f.extension)) return false;
-      // Use the later of stat.mtime and the persisted canonical mtime so a
-      // file remains visible if either signal places it inside the window.
-      const effective = this.plugin.effectiveMtime(f);
-      if (Math.max(f.stat.mtime, effective) < cutoff) return false;
+    const groupsMap = new Map<string, DayGroup>();
 
+    for (const f of all) {
+      if (!SUPPORTED_EXTENSIONS.has(f.extension)) continue;
+
+      // Check folder exclusions
       const segs = f.path.split("/");
+      let excluded = false;
       for (let i = 0; i < segs.length - 1; i++) {
-        if (segs[i].startsWith(".")) return false;
+        if (segs[i].startsWith(".")) { excluded = true; break; }
       }
+      if (excluded) continue;
 
       for (const ex of excludedFolders) {
-        if (matchesFolder(f.path, ex)) return false;
+        if (matchesFolder(f.path, ex)) { excluded = true; break; }
       }
+      if (excluded) continue;
 
       if (!showBg) {
         for (const bg of backgroundFolders) {
-          if (matchesFolder(f.path, bg)) return false;
+          if (matchesFolder(f.path, bg)) { excluded = true; break; }
         }
       }
+      if (excluded) continue;
 
-      if (this.plugin.isDismissed(f)) return false;
-      return true;
-    });
+      // Get entries from frontmatter
+      const entries = this.plugin.getFileEntries(f);
+      if (entries.length === 0) continue;
 
-    const groupsMap = new Map<string, DayGroup>();
-    for (const f of filtered) {
-      const d = new Date(this.plugin.effectiveMtime(f));
-      const key = formatDayKey(d);
-      let g = groupsMap.get(key);
-      if (!g) {
-        g = { key, date: startOfLocalDay(d), files: [] };
-        groupsMap.set(key, g);
+      // Add entries to groups
+      for (const entry of entries) {
+        if (entry.timestamp < cutoff) continue;
+
+        const d = new Date(entry.timestamp);
+        const key = formatDayKey(d);
+        let g = groupsMap.get(key);
+        if (!g) {
+          g = { key, date: startOfLocalDay(d), files: [] };
+          groupsMap.set(key, g);
+        }
+        g.files.push(entry);
       }
-      g.files.push(f);
     }
 
     const groups = Array.from(groupsMap.values());
     groups.sort((a, b) => b.date.getTime() - a.date.getTime());
     for (const g of groups) {
-      g.files.sort(
-        (a, b) =>
-          this.plugin.effectiveMtime(b) - this.plugin.effectiveMtime(a)
-      );
+      g.files.sort((a, b) => b.timestamp - a.timestamp);
     }
     return groups;
   }
@@ -669,10 +490,6 @@ class RecentEditsView extends ItemView {
     const container = this.contentEl;
     container.empty();
     container.addClass("recent-edits-container");
-    container.style.setProperty(
-      "--recent-edits-dot-color",
-      this.plugin.settings.externalEditColor
-    );
 
     const hasBackground = this.plugin.settings.backgroundFolders.length > 0;
     const groups = this.getRecentFiles();
@@ -758,15 +575,16 @@ class RecentEditsView extends ItemView {
     });
 
     const filesEl = groupEl.createDiv({ cls: "recent-edits-day-files" });
-    for (const f of g.files) {
-      this.renderFileRow(filesEl, f);
+    for (const entry of g.files) {
+      this.renderFileRow(filesEl, entry);
     }
   }
 
-  private renderFileRow(parent: HTMLElement, file: TFile) {
+  private renderFileRow(parent: HTMLElement, entry: FileEntry) {
+    const file = entry.file;
     const row = parent.createDiv({ cls: "recent-edits-row" });
-    if (this.plugin.isExternalEdit(file)) {
-      row.addClass("is-external-edit");
+    if (entry.isCreatedDate) {
+      row.addClass("is-new-file");
     }
 
     const info = row.createDiv({ cls: "recent-edits-row-info" });
@@ -829,7 +647,7 @@ class RecentEditsView extends ItemView {
     }
     meta.createSpan({
       cls: "recent-edits-row-time",
-      text: formatTime12h(new Date(this.plugin.effectiveMtime(file))),
+      text: formatTime12h(new Date(entry.timestamp)),
     });
 
     row.addEventListener("click", (evt) => {
@@ -909,20 +727,6 @@ class RecentEditsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("External edit indicator color")
-      .setDesc(
-        "Color of the dot shown next to files edited from outside Obsidian (filesystem writes, sync, plugins). Default is Anthropic orange."
-      )
-      .addColorPicker((picker) =>
-        picker
-          .setValue(this.plugin.settings.externalEditColor)
-          .onChange(async (val) => {
-            this.plugin.settings.externalEditColor = val;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
       .setName("Copy absolute path affordance")
       .setDesc(
         "How to expose the 'copy absolute path to clipboard' action on each row. The button is an explicit, always-visible target; the folder-path text is a subtler invisible affordance. Use Both to expose both."
@@ -950,7 +754,7 @@ class RecentEditsSettingTab extends PluginSettingTab {
         this.plugin.settings.backgroundFolders = v;
         await this.plugin.saveSettings();
       },
-      placeholder: "Type a folder path…",
+      placeholder: "Type a folder path...",
       datalistId: "recent-edits-background-folder-list",
     });
 
@@ -962,7 +766,7 @@ class RecentEditsSettingTab extends PluginSettingTab {
         this.plugin.settings.excludedFolders = v;
         await this.plugin.saveSettings();
       },
-      placeholder: "Type a folder path…",
+      placeholder: "Type a folder path...",
       datalistId: "recent-edits-excluded-folder-list",
     });
   }
@@ -1006,7 +810,7 @@ class RecentEditsSettingTab extends PluginSettingTab {
         });
         const x = chip.createSpan({
           cls: "recent-edits-chip-x",
-          text: "×",
+          text: "\u00d7",
         });
         x.setAttribute("aria-label", `Remove ${folder}`);
         x.addEventListener("click", () => {

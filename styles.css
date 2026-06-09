@@ -148,13 +148,13 @@
   background: var(--background-modifier-hover);
 }
 
-.recent-edits-row.is-external-edit .recent-edits-row-name::before {
+.recent-edits-row.is-new-file .recent-edits-row-name::before {
   content: "";
   display: inline-block;
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background-color: var(--recent-edits-dot-color, #D97757);
+  background-color: var(--text-success, #4CAF50);
   margin-right: 6px;
   vertical-align: middle;
   position: relative;
